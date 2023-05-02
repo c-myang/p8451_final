@@ -20,119 +20,129 @@ library(rpart.plot)
 library(kableExtra)
 library(corrplot)
 library(factoextra)
-library(cluster)
 ```
 
 ## Research Question and Objectives
 
-D)	Construct a prediction model to identify individuals with an outcome of interest in an unseen dataset. The rationale for the need of the prediction model must be presented.
+- Construct a prediction model to identify individuals with an outcome of interest in an unseen dataset. The rationale for the need of the prediction model must be presented.
+
+The research question seeks to explore the feasibility of using machine learning algorithms to predict the likelihood of an extended hospital length of stay for patients based on various patient characteristics and condition, including demographics, insurance type, severity of illness, and mortality risk. The study's rationale is rooted in the need to identify predictive factors that could help hospitals and healthcare providers better manage patient care and allocate resources more efficiently. By predicting which patients are at high risk of an extended hospital stay, healthcare providers can develop personalized treatment plans, discharge plans, and adjust resource allocation to improve overall patient outcomes, reduce healthcare costs and enhance patient satisfaction. 
 
 ## Description of Data
 
-The data we will be using are from the from the 2015 Hospital Inpatient Discharge Data, from the New York Statewide Planning and Research Cooperative System (SPARCS). *We will be using this dataset to try to predict an extended length of stay (LOS), defined as longer than 7 days.* We have restricted the dataset to x features and an outcome which distinguishes those who ....
+For this study, we will be using patient data from the New York Statewide Planning and Research Cooperative System (SPARCS) for the 2015 Hospital Inpatient Discharge Data. *Our goal is to predict if a patient will have an extended length of stay, which is defined as longer than 7 days, using this dataset.* We will use patient demographics, medical condition, insurance information, and cost of treatment to evaluate an optimal machine learning algorithm to predict an extended length of stay.
 
+## Analytic pipeline
 
-## Data pipeline
+The pipeline for this analysis is outlined below:
 
-Encompass a full analytic pipeline appropriate for the specific research question (e.g. the construction of a risk score requires typical components of a prediction pipeline but then additionally assesses calibration)
+1. Data Preparation
+    -	Removing ID variable
+    -	Removing missing observations
+    -	Converting variables to factor when appropriate
+    - Checking for and removing highly correlated variables
+    -	Check balance
+    -	Centering and scaling 
 
-### Step 1: Load data and prepare for analysis
+2. Unsupervised analysis
 
-The code chunk below loads the SPARCS data, omits missing observations, and converts several variables to factor variables. Although Classification Trees can handle missing data, regression-based algorithms cannot, and therefore we will omit missing variables to be able to compare model performance on the same subset of training data.
+3. Data partitioning
+    -	70/30 split into training and testing data
+
+4. Supervised analysis
+  - Training
+    -	10-fold cross validation on the full training set
+    - Train best model based on area under the receiver operating characteristic curve (AUROC) performance metric
+    -	Downsample data if unbalanced
+  -	Tuning hyperparameters: 
+      - Elastic Net: alpha and lambda
+      - Classification Tree: Cp
+
+4. Comparing model performance
+    -	Compare AUROC, sensitivity, and specificity across models
+    - Select model based on AUROC
+
+5. Apply model to testing data
+    -	Evaluate confusion matrix
+    - Examine variable importance if applicable
+
+## 1. Data Preparation 
+
+The code chunk below loads the SPARCS data, omits missing observations, and converts several variables to factor variables. Although Classification Trees can handle missing data, regression-based algorithms cannot, and therefore we will omit missing variables to be able to compare model performance on the same subset of data.
+
+Moreover, we select features related to patient demographics (age group, gender, race, ethnicity), patient condition and disposition (admission type, severity of illness, mortality risk and surgical/medical indicator), charge and cost, as well as payment/insurance type. Given there are 3 payment typologies associated with each observation, we create a series of binary indicator variables to indicate whether a patient used a combination of Medicare, Medicaid, Blue Cross/Blue Shield, private, self-paying, or government insurance. 
 
 ```{r load_data}
-hospital_raw = read_csv(
-    "./Hospital_Inpatient_Discharges__SPARCS_De-Identified___2015.csv") %>%
-  janitor::clean_names() 
-
-hospital_ds = hospital_raw %>%
-  select (-facility_id, -operating_certificate_number, -discharge_year, -facility_name, 
-          -birth_weight, -abortion_edit_indicator, -ccs_diagnosis_code, -ccs_procedure_code, 
-          -apr_drg_code, -apr_mdc_code, -apr_severity_of_illness_code, -zip_code_3_digits) %>%
+hospital_supervised = hospital_raw %>% 
+  select (age_group, gender, race, ethnicity, type_of_admission, 
+          apr_severity_of_illness_description, apr_risk_of_mortality, 
+          apr_medical_surgical_description, total_charges, total_costs, 
+          payment_typology_1, payment_typology_2, payment_typology_3, length_of_stay) %>%
   mutate (length_of_stay = as.numeric (length_of_stay),
           extended_stay = case_when(length_of_stay > 7 ~ "Yes",
                                     length_of_stay <= 7 ~ "No"),
           extended_stay = as.factor(extended_stay)) %>%
-  mutate_at(vars(health_service_area, hospital_county,
-                  age_group, gender, race, ethnicity, type_of_admission,
-                  patient_disposition, ccs_diagnosis_description,
-                  ccs_procedure_description, apr_drg_description,
-                  apr_mdc_description,  apr_severity_of_illness_description,
-                  apr_risk_of_mortality, apr_medical_surgical_description,
-                  emergency_department_indicator), as.factor) %>% 
-  mutate(medicare = ifelse(payment_typology_1 == "Medicare" | payment_typology_2 == "Medicare" | 
+  mutate_at(vars(age_group, gender, race, ethnicity, type_of_admission, 
+                  apr_severity_of_illness_description, apr_risk_of_mortality,
+                 apr_medical_surgical_description), as.factor) %>% 
+  mutate(medicare = ifelse(payment_typology_1 == "Medicare" | 
+                             payment_typology_2 == "Medicare" | 
                                 payment_typology_3 == "Medicare", "Yes", "No"),
-         medicaid = ifelse(payment_typology_1 == "Medicaid" | payment_typology_2 == "Medicaid" | 
+         medicaid = ifelse(payment_typology_1 == "Medicaid" | 
+                             payment_typology_2 == "Medicaid" | 
                                 payment_typology_3 == "Medicaid", "Yes", "No"),
          private = ifelse(payment_typology_1 == "Private Health Insurance" | 
                             payment_typology_2 == "Private Health Insurance" | 
-                                payment_typology_3 == "Private Health Insurance", "Yes", "No"),
+                                payment_typology_3 == "Private Health Insurance",
+                          "Yes", "No"),
          blue_cross = ifelse(payment_typology_1 == "Blue Cross/Blue Shield" | 
                             payment_typology_2 == "Blue Cross/Blue Shield" | 
-                                payment_typology_3 == "Blue Cross/Blue Shield", "Yes", "No")) %>% 
-  mutate_at(vars(medicare:blue_cross), as.factor) %>% 
-  select(-payment_typology_1:-payment_typology_3, -length_of_stay) %>% 
-  na.omit(hospital_ds) 
-
-hospital_supervised = hospital_ds %>% 
-  select (-facility_id, -operating_certificate_number, -discharge_year, -facility_name, 
-          -birth_weight, -abortion_edit_indicator, -ccs_diagnosis_code, -ccs_procedure_code, 
-          -apr_drg_code, -apr_mdc_code, -apr_severity_of_illness_code, -zip_code_3_digits,
-          -patient_disposition,-apr_drg_description, -ccs_diagnosis_description, -ccs_procedure_description, total_costs) %>%
-  mutate (length_of_stay = as.numeric (length_of_stay),
-          extended_stay = case_when(length_of_stay > 7 ~ "Yes",
-                                    length_of_stay <= 7 ~ "No"),
-          extended_stay = as.factor(extended_stay)) %>%
-  mutate_at(vars(health_service_area, hospital_county,
-                  age_group, gender, race, ethnicity, type_of_admission, 
-                  apr_mdc_description,  apr_severity_of_illness_description,
-                  apr_risk_of_mortality, apr_medical_surgical_description,
-                  emergency_department_indicator), as.factor) %>% 
-  mutate(medicare = ifelse(payment_typology_1 == "Medicare" | payment_typology_2 == "Medicare" | 
-                                payment_typology_3 == "Medicare", "Yes", "No"),
-         medicaid = ifelse(payment_typology_1 == "Medicaid" | payment_typology_2 == "Medicaid" | 
-                                payment_typology_3 == "Medicaid", "Yes", "No"),
-         private = ifelse(payment_typology_1 == "Private Health Insurance" | 
-                            payment_typology_2 == "Private Health Insurance" | 
-                                payment_typology_3 == "Private Health Insurance", "Yes", "No"),
-         blue_cross = ifelse(payment_typology_1 == "Blue Cross/Blue Shield" | 
-                            payment_typology_2 == "Blue Cross/Blue Shield" | 
-                                payment_typology_3 == "Blue Cross/Blue Shield", "Yes", "No"),
+                                payment_typology_3 == "Blue Cross/Blue Shield",
+                            "Yes", "No"),
         self_pay = ifelse(payment_typology_1 == "Self-Pay" | 
-                            payment_typology_2 == "Self-Pay" | payment_typology_3 == "Self-Pay", "Yes", "No"),
-        fed = ifelse(payment_typology_1 == "Federal/State/Local/VA" | 
+                           payment_typology_2 == "Self-Pay" | 
+                            payment_typology_3 == "Self-Pay", "Yes", "No"),
+        gov = ifelse(payment_typology_1 == "Federal/State/Local/VA" | 
                             payment_typology_2 == "Federal/State/Local/VA" | 
-                                payment_typology_3 == "Federal/State/Local/VA", "Yes", "No")) %>%
-  mutate_at(vars(medicare:blue_cross), as.factor) %>% 
+                                payment_typology_3 == "Federal/State/Local/VA", 
+                     "Yes", "No")) %>%
+  mutate_at(vars(medicare:gov), as.factor) %>% 
   select(-payment_typology_1:-payment_typology_3, -length_of_stay) %>% 
   na.omit(hospital_ds) 
 
-summary(hospital_ds) %>% kbl(digits = 3) %>% 
+summary(hospital_supervised) %>% kbl(digits = 3) %>% 
   kable_classic(lightable_options = "hover") %>% 
   scroll_box(width = "100%", height = "100%")
 ```
 
+Our resulting dataset contains `r nrow(hospital_ds)` observations of `r ncol(hospital_ds)` features, with 1 containing our binary outcome variable, `extended_stay`. Based on the summary, we can see that the distribution of diabetes is quite unbalanced, with a 20% prevalence of cases. 
+
+### Data check
+
+The code chunk below determines whether centering and scaling of the data is necessary, evaluates the data for highly-correlated predictors, based on a correlation cutoff of 0.4.
+
 ```{r scale}
 #Determining if we need to center and scale the data
-hospital.numeric = hospital_ds %>% select(where(is.numeric))
+hospital.numeric = hospital_supervised %>% select(where(is.numeric))
 
-#Obtain and compare means and standard deviations across features. na.rm removes the missings
+#Obtain and compare means and standard deviations across features
 colMeans(hospital.numeric, na.rm=TRUE)
 apply(hospital.numeric, 2, sd, na.rm=TRUE)
 
-#Finding correlated predictors
+## Checking for highly correlated variables
+#Finding and removing correlated predictors
+hospital_ds <- hospital_supervised %>% dplyr::select(where(is.numeric))
+correlations<-cor(hospital_ds, use = "complete.obs")
+high.correlations<-findCorrelation(correlations, cutoff=0.4)
 
-corplot = cor(hospital.numeric)
-correlations = cor(hospital.numeric, use="complete.obs")
-high.correlations = findCorrelation(correlations, cutoff=0.4)
-
-#Remove highly correlated features
-hospital_ds = hospital_ds %>% select(-total_costs)
+#Removing highly correlated features (i.e total_costs from the data)
+hospital_supervised = hospital_supervised %>% 
+  select(-total_costs)
 ```
 
-Our resulting dataset contains `r nrow(hospital_ds)` observations of `r ncol(hospital_ds)` features, with 1 containing our binary outcome variable, `extended_stay`. Based on the summary, we can see that the distribution of diabetes is quite unbalanced, with a 20% prevalence of cases. 
+The mean and standard deviations across the two numeric variables, `total_charges` and `total_costs` appears to be slightly different, with total charges having a higher mean and SD. Hoewver, given that both variables are highly correlated with each other, we remove `total_costs` from the data, as it represents the total costs charged to each patient, as opposed to total_charges, which represents total charge incurred by the hospital. 
 
-### Step 2: Partition the data 
+## 2. Data partitioning
 
 The code chunk below partitions the data into training and testing sets, using a 70/30 split. 
 
@@ -140,37 +150,32 @@ The code chunk below partitions the data into training and testing sets, using a
 set.seed(123)
 
 #Creating balanced partitions in the data
-train_index = createDataPartition(hospital_ds$extended_stay, p = 0.7, list = FALSE)
+train_index = createDataPartition(hospital_supervised$extended_stay, p = 0.7, list = FALSE)
 
-training = hospital_ds[train_index,]
-testing = hospital_ds[-train_index,]
+training = hospital_supervised[train_index,]
+testing = hospital_supervised[-train_index,]
 
 #Check distribution of the outcome between train and test data
 summary(training$extended_stay) 
 summary(testing$extended_stay)
 ```
 
-We can see that there are similar distributions of the variable `extended_stay`, with approximately x% of observations having diabetes across both the training and testing sets, indicating that the data were successfully partitioned.
+We can see that there are similar distributions of the variable `extended_stay`, with approximately 21% of observations having an extended stay across both the training and testing sets, indicating that the data were successfully partitioned.
 
-### Step 3: Construct supervised algorithms to predict extended LOS
+## 3. Unsupervised Analysis
 
-We will fit 3 prediction models to predict diabetes status. (feature name: `Diabetes`). 
+Given the large number of features within our data, we would like to know whether we can reduce the dimensionality of several variables relating to a patient's medical condition within the dataset. Using Principal Component Analysis, we will attempt to transform the original variables into a smaller set of linearly uncorrelated variables and evaluate the appropriateness of using these principal components within the predictive models. The potential utility of this variable would be to integrate a more comprehensive set of variables which capture patient health condition into training the prediction models to predict extended length of stay. 
 
-- Model 1 (`mod_log`): A logistic model based on all features that will serve as our baseline model.
+### Data preparation for PCA
 
-- Model 2 (`class_tree`): Classification Tree based on all features.
+We have chosen age group, type of admission, APR illness severity, risk of mortality, and medical surgical description as the variables related to a patient's medical condition that we aim to reduce the dimensionality of. The code chunk below loads the SPARCS data and omits missing observations. Since PCA cannot handle non-numeric values, we assign numeric values to categorical variables in increasing order of severity, as outlined below. We also create a centered and scaled dataset to obtain eigenvalues.
 
-- Model 3 (`mod_EN`): Elastic Net
+```{r pca data clean}
+hospital_raw = read_csv(
+    "./Hospital_Inpatient_Discharges__SPARCS_De-Identified___2015.csv") %>%
+  janitor::clean_names() 
 
-The models will be trained and selected based on the highest Area Under the ROC (AUROC) rather than accuracy, because we want to balance the sensitivity and specificity of diabetes classification. This will be done using `summaryFunction = twoClassSummary` and `metric = "ROC"` options within `trainControl()` and `train()` in caret, respectively.
-
-
-### Creating a new variable using unsupervised learning method
-
-## Principal Component analysis
-
-```{r}
-hospital_unsupervised = hospital_raw %>% 
+hosp_unsupervised = hospital_raw %>% 
   select (age_group, type_of_admission, apr_severity_of_illness_code, apr_risk_of_mortality, apr_medical_surgical_description) %>%
   mutate(age_group = case_when(age_group == "0 to 17" ~ 0,
                              age_group == "18 to 29" ~ 1,
@@ -187,151 +192,115 @@ hospital_unsupervised = hospital_raw %>%
                                        type_of_admission == "Urgent" ~ 3,
                                        type_of_admission == "Trauma" ~ 4,
                                        type_of_admission == "Emergency" ~ 5),
-         apr_medical_surgical_description = case_when(apr_medical_surgical_description == "Not Available" ~ 0,
-                                                      apr_medical_surgical_description == "Medical" ~ 1,
-                                                      apr_medical_surgical_description == "Surgical" ~2 )) %>% 
+         apr_medical_surgical_description = 
+           case_when(apr_medical_surgical_description == "Not Available" ~ 0,
+                     apr_medical_surgical_description == "Medical" ~ 1, 
+                     apr_medical_surgical_description == "Surgical" ~2 )) %>% 
   na.omit(hospital_ds) 
+
+scaled_data = scale(hosp_unsupervised, center = TRUE, scale = TRUE)
 
 ```
 
+Using this `hosp_unsupervised` data, the code chunk below obtains the eigenvalues, scree plot, and PCA results.
 
-```{r}
-scaled_data = scale(hospital_unsupervised, center = TRUE, scale = TRUE)
+```{r pca}
 e.scaled = eigen(cov(scaled_data))
-print(e.scaled)
+print(e.scaled$values)
 
-#The function prcomp() will center and scale the variables and then identify the principal components
-bc.pca <- prcomp( ~ ., data = hospital_unsupervised, center = TRUE, scale = TRUE, na.action = na.omit)
-
-#Can compare sds used to scale with the sds above to ensure they are close.
-bc.pca$scale
+# Run PCA
+bc.pca <- prcomp( ~ ., data = hosp_unsupervised, center = TRUE, scale = TRUE, 
+                  na.action = na.omit)
 
 #Generates scree plot
 fviz_eig(bc.pca)
 
-#view results of pca. Note the first three components are needed to explain at least 75% of the variance
+#View results of pca 
 summary(bc.pca)
 
 #Identify how features loaded on the different components
-bc.pca$rotation
+bc.pca$rotation 
 
-ggbiplot(bc.pca)
-
-ggbiplot(bc.pca, choices=c(2,3))
-
-pca_var = as.data.frame(bc.pca$x[,1:3])
-colnames(pca_var) = c("patient_health1", "PC2", "PC3")
-```
-
-Based on this the five variables fed into the PCA analysis produced 5 principal components. With the bend in the screeplot between PC2 and PC3, and the first 3 components accounting for 86.2% of the variability in the total screeplot.
-We ran PCA because we wanted to see whether these variables would adequately capture patient health condition. The utility of using this variable would serve to understand how important patient health condition is in predicting extended length of stay. 
-
-### Supervised Learning method
-
-## Logistic Regression
-
-```{r}
-
-
-
+# Create variables based on principal components
+as.data.frame(bc.pca$x[,1:3])
+colnames(pca_var) = c("PC1", "PC2", "PC3")
 
 ```
-## Partioning the data using a 70/30 split
 
-```{r}
-train.supervised<-createDataPartition(y=hospital_supervised$extended_stay,p=0.7,list=FALSE)
-train.sup<-hospital_supervised[train.supervised, ]
-test.sup<-hospital_supervised[-train.supervised, ]
-```
+According to the findings, it is feasible to reduce the selected variables to either 2 or 3 components. Specifically, the eigenvalues reveal that the first two principal components exceed the threshold of 1, whereas the third component is slightly below this threshold at 0.90. Furthermore, the scree plot demonstrates a subtle inflection point at the 2nd component. The first two principal components collectively explain 68.14% of the variability in the data.
 
-```{r}
+Examining the data, we see that PC1 is moderately and negatively correlated with all variables, thus representing patients who are younger, are admitted with lower urgency, and have lower severity of illness and mortality risk. Meanwhile, PC2 may represent patients of older age admitted to surgery, but of slightly lower severe illness and mortality risk. Finally, PC3 may represent lower-risk but older patients.
+
+Although it is possible to include these variables in our supervised prediction models, we do not believe it would be appropriate to do so. This is because by numerically encoding each categorical variable, there is an assumption of a linearly proportional relationship between the predictor and outcome, which may not apply to the variables in this subset of data.  
+
+## 4. Supervised Analysis
+
+We will fit 3 prediction models to predict extended length of stay. (feature name: `extended_stay`). 
+
+- Model 1 (`mod_log`): A logistic model based on all features that will serve as our baseline model.
+
+- Model 2 (`class_tree`): Classification Tree based on all features.
+
+- Model 3 (`mod_EN`): Elastic Net
+
+The models will be trained and selected based on the highest Area Under the ROC (AUROC) rather than accuracy, because we want to balance the sensitivity and specificity of diabetes classification. This will be done using `summaryFunction = twoClassSummary` and `metric = "ROC"` options within `trainControl()` and `train()` in caret, respectively.
+
+### Logistic Regression Model
+
+To fit the logistic model, we will feed all features into the model, and train within caret on the training dataset. As the logistic model serves only as a baseline model, we will not implement any train control measures for cross-validation nor downsampling/upsampling.
+
+```{r mod_logistic}
 set.seed(123)
-# Create training control object for cross-validation
-train_control <- trainControl(method = "cv", number = 10)
-#running a traditional logistic regression model
-model_glm <- train(
-  extended_stay ~ ., 
-  data = train.sup, 
-  method = "glm", 
-  trControl = train_control, 
-  family = "binomial"
-)
-pred_glm <- predict(model_glm, newdata = train.sup) %>% 
-  mutate(pred_glm=as.factor(pred_glm))
-conf_mat_glm <- confusionMatrix(pred_glm, train.sup$extended_stay)
-print("Confusion Matrix for Traditional Logistic Regression Model")
-conf_mat_glm
+train_control_log = trainControl(summaryFunction = twoClassSummary, classProbs = TRUE)
 
+mod_log = train(extended_stay ~ ., data = training, method = "glm", trControl = train_control_log, metric = "ROC")
 
+# View results from training 
+mod_log$results %>% 
+  kbl(digits = 4) %>% 
+  kable_classic("hover") 
 
+# Save model results
+log_perf = mod_log$results %>% arrange(desc(ROC)) %>% slice(1) %>% 
+  rename(Hyperparameter = "parameter") %>% 
+  mutate(Hyperparameter = as.numeric(Hyperparameter))
 ```
 
-## Elastic Net 
+The resulting model yielded an AUROC of `round(mod_log$results$ROC, 3)*100`%, with a very high sensitivity of `round(mod_log$results$Sens, 3)*100`% but a lower specificity of `round(mod_log$results$Spec, 3)*100`%.
 
-```{r}
+### Elastic Net Model
+
+To fit the elastic model, we will feed all features into the model, and train within caret using 10-fold CV and down-sampling. We will set the tune length to 100 for the number of combinations to search for alpha and lambda.
+
+```{r mod_EN}
 set.seed(123)
 
-set.seed(123)
+#Set 10-fold cross-validation and downsample
+train_control = trainControl(method = "cv", number = 10, sampling = "down", classProbs = T, summaryFunction = twoClassSummary)
 
-train.control<-trainControl(method="cv", number=10, sampling="down")
+# Train model
+mod_EN = train(extended_stay ~ ., data = training, method = "glmnet", 
+                trControl = train_control, 
+                preProcess = c("center", "scale"), 
+                tuneLength = 100, 
+                metric = "ROC")
 
+# View results from training 
+EN_perf = mod_EN$results %>% arrange(desc(ROC)) %>% head() 
+EN_perf %>% kbl(digits = 4) %>% 
+  kable_classic("hover") 
 
-
-en.model<- train(
-  readmission ~ ., 
-  data = train.data, 
-  method = "glmnet", 
-  trControl = train.control, 
-  family = "binomial", 
-  standardize = TRUE
-)
-
-#Print the values of alpha and lambda that gave best prediction
-en.model$bestTune #alpha = 0, lambda = 0.6
-
-#Print all of the options examined
-en.model$results #accuracy = 0.616
-
-coef(en.model$finalModel,en.model$bestTune$lambda)
-
-
-
+# Save results
+EN_perf = EN_perf %>% arrange(desc(ROC)) %>% 
+  slice(1) %>%
+  select(-alpha, -lambda)
 ```
 
-## Classification tree
-```{r classtree}
+The resulting model yielded an AUROC of `round(mod_EN$results$ROC, 3)*100`%, with  hyperparameters of alpha = `mod_EN$bestTune$alpha` and lambda = `mod_EN$bestTune$lambda`. The model performance yields  a  sensitivity of `round(mod_EN$results$Sens, 3)*100`% but a lower specificity of `round(mod_EN$results$Spec, 3)*100`%.
 
-set.seed(123)
+### Classification Tree
 
-### Creating 10-fold cross-validation and using down-sampling because of imbalance in data
-train.control<-trainControl(method="cv", number=10, sampling="down")
-
-### Create sequence of cp parameters to try 
-grid.2<-expand.grid(cp=seq(0.001, 0.3, by=0.01))
-
-#### Train model
-tree.diabetes<-train(diabetes~., data=train.data, method="rpart",trControl=train.control, tuneGrid=grid.2)
-tree.diabetes$results
-tree.diabetes$bestTune
-
-### PLotting the classification tree
-rpart.plot(tree.diabetes$finalModel)
-
-### Obtaining variable importance on the final model within training data
-varImp(tree.diabetes)
-
-### Getting accuracy metric and confusion matrix from training.
-confusionMatrix(tree.diabetes)
-
-```
-
-
-
-
-# NEED TO EDIT LATER
-#### Classification Tree
-
-To fit the classification tree, we will train using 10-fold cross-validation, and set the tune grid to values ranging from 0.001 to 0.3, searching in increments of 0.01. We will use down-sampling because of a 90/10 imbalance of the outcome variable, Diabetes, in the data.
+To fit the classification tree, we will train using 10-fold cross-validation, and set the tune grid to values ranging from 0.001 to 0.3, searching in increments of 0.01. We will use down-sampling because of a 80/20 imbalance of the outcome variable in the data.
 
 ```{r classtree}
 set.seed(123)
@@ -344,10 +313,12 @@ train.control.class = trainControl(method = "cv", number = 10, sampling = "down"
 grid.2 = expand.grid(cp = seq(0.001, 0.3, by = 0.01))
 
 #Train model
-class_tree = train(Diabetes ~ ., data = NHANES_train, method = "rpart", trControl = train.control.class, tuneGrid = grid.2, metric = "ROC")
+class_tree = train(extended_stay ~ ., data = training, method = "rpart", trControl = train.control.class, tuneGrid = grid.2, metric = "ROC")
 
 # View results
-class_tree$results %>% head() %>% knitr::kable()
+class_tree$results %>% head() %>% 
+  kbl(digits = 4) %>% 
+  kable_classic("hover") 
 
 # Obtain variable importance on the final model within training data
 varImp(class_tree)
@@ -361,69 +332,19 @@ class_perf = class_tree$results %>% arrange(desc(ROC)) %>%
   rename(Hyperparameter = "cp")
 ```
 
-The resulting model found that for the most optimal AUROC of 78.91%, there is a relatively small complexity parameter Cp of 0.001, which suggests that increasing the size and complexity of the tree yields better model performance. We can see that the most important variables in the classification tree in descending order of importance include Age, BMI, and Weight, and as such these are the features that are split near the top of the tree, while lower-importance variables are split near the bottom of the tree.
-
-#### SVC Model
-
-To fit the SVC model, we will train using 10-fold cross-validation, and set the tune grid of length 30 of values ranging from 0.001 to 2. We will also use down-sampling because of a 90/10 imbalance of the outcome variable, Diabetes, in the data.
-
-```{r mod_svc}
-set.seed(123)
-
-#Set 10-fold cross-validation and downsample
-train_control = trainControl(method = "cv", number = 10, sampling = "down", classProbs = T, summaryFunction = twoClassSummary)
-
-#Incorporate different values for cost (C)
-mod_svc = train(Diabetes ~ ., data = NHANES_train, method = "svmLinear",  trControl = train_control, 
-                preProcess = c("center", "scale"), 
-                tuneGrid = expand.grid(C = seq(0.001, 2, length = 30)), 
-                metric = "ROC")
-
-# View results from training 
-mod_svc$results %>% arrange(desc(ROC)) %>% head() %>% knitr::kable()
-
-#Visualize accuracy versus values of C
-plot(mod_svc)
-
-# Save results
-svc_perf = mod_svc$results %>% arrange(desc(ROC)) %>% 
-  slice(1) %>%
-  rename(Hyperparameter = "C")
-```
-
-For the most optimal AUROC of 81.63%, the the trained SVC model found a hyperparameter (C) of 1.035, allowing a moderate threshold of misclassification between classes. As confirmed by the plot, other values of C from 0.001 to 2 did not optimize the ROC. 
-
-#### Logistic Regression Model
-
-To fit the logistic model, we will feed all features into the model, and train within caret on the training dataset.
-
-```{r mod_logistic}
-set.seed(123)
-train_control_log = trainControl(summaryFunction = twoClassSummary, classProbs = TRUE)
-
-mod_log = train(Diabetes ~ ., data = NHANES_train, method = "glm", trControl = train_control_log, metric = "ROC")
-
-# View results from training 
-mod_log$results %>% knitr::kable()
-
-# Save model results
-log_perf = mod_log$results %>% arrange(desc(ROC)) %>% slice(1) %>% 
-  rename(Hyperparameter = "parameter") %>% 
-  mutate(Hyperparameter = as.numeric(Hyperparameter))
-```
-
-The resulting model yielded an AUROC of 80.73%, with a very high sensitivity of 98.5% but a very low specificity of 8.24%.
+The resulting model found that for the most optimal AUROC of `round(class_tree$results$ROC, 3)*100`%, there is a complexity parameter Cp of `mod_EN$bestTune$cp`, which suggests that increasing the size and complexity of the tree yields better model performance. We can see that the most important variables in the classification tree in descending order of importance include ... and as such these are the features that are split near the top of the tree, while lower-importance variables are split near the bottom of the tree.
 
 #### Comparing performance across models
 
 Finally, let's compare the performance results on the training data across the 3 models.
 
 ```{r compare}
-rbind(class_perf, log_perf, svc_perf) %>% 
-  mutate(Model = c("Classification Tree", "Logistic Regression", "SVC")) %>% 
+rbind(class_perf, log_perf, EN_perf) %>% 
+  mutate(Model = c("Classification Tree", "Logistic Regression", "Elastic Net")) %>% 
   relocate(Model) %>% 
   arrange(desc(ROC)) %>% 
-  knitr::kable(digits = 4)
+  kbl(digits = 4) %>% 
+  kable_classic("hover") 
 ```
 
 The table shows that the SVC model has the best performance as measured by AUROC (81.64%%), followed by the baseline logistic regression model (80.73%), then the Classification Tree (78.91%). We can see that for the SVC, there is better balance of sensitivity (71.76%) and specificity (77.9%), and while the baseline model has the second highest AUROC, there is a very large imbalance of sensitivity (98.49%) and specificity (8.24%). Therefore, I would choose the SVC as my final model to optimally classify diabetes without an overwhelming imbalance of false positives that would be introduced if I chose the baseline model.
@@ -434,18 +355,17 @@ Finally, we will evaluate the performance our final SVC model by making predicti
 
 ```{r test}
 # Make predictions in test set
-pred = mod_svc %>% predict(NHANES_test)
-NHANES_test = NHANES_test %>% mutate(pred = as.factor(pred))
+pred = mod_EN %>% predict(testing)
+testing = testing %>% mutate(pred = as.factor(pred))
 
 # Get evaluation metrics from test set
-cm = confusionMatrix(data = NHANES_test$pred, reference = NHANES_test$Diabetes, positive = "Yes")
-
+cm = confusionMatrix(data = testing$pred, reference = testing$extended_stay, positive = "Yes")
 
 #Create ROC Curve for Analysis
-pred_prob <- predict(mod_svc, NHANES_test, type = "prob")
+pred_prob <- predict(mod_EN, testing, type = "prob")
 
 # Plot Area under the Receiver Operating Curve (AUROC)
-analysis =  roc(response = NHANES_test$Diabetes, predictor = pred_prob[,2])
+analysis =  roc(response = testing$extended_stay, predictor = pred_prob[,2])
 
 # View results
 cm
@@ -453,7 +373,7 @@ analysis$auc
 
 plot(1 - analysis$specificities, analysis$sensitivities, type = "l",
 ylab = "Sensitivity",xlab = "1-Specificity", col = "black", lwd = 2,
-main = "ROC Curve for Diabetes Classification")
+main = "ROC Curve for Extended Length of Stay Classification")
 abline(a = 0, b = 1)
 ```
 
@@ -461,7 +381,7 @@ On the testing set, we can see that the AUROC of our final model is 82.35%, with
 
 ## Limitations
 
-One main consideration that arose was the imbalance of cases and controls in the NHANES data that we used to train the model on, where there were a disproportionate number of cases without diabetes compared to those with diabetes. With imbalanced data, information required to make an accurate prediction about the minority class is limited, and therefore when applied to new data, the model may not perform well when trying to predict new cases of diabetes. Although we dealt with this issue by downsampling while training our model, we saw a lower PPV, and this limitation is what we may expect when applying the algorithm on new data with a low prevalence of diabetes.
+One main consideration that arose was the imbalance of cases and controls in the SPARCS data that we used to train the model on, where there were a disproportionate number of observations without extended stay. With imbalanced data, information required to make an accurate prediction about the minority class is limited, and therefore when applied to new data, the model may not perform well when trying to predict new extended stay cases. Although we dealt with this issue by downsampling while training our model, we saw a lower PPV, and this limitation is what we may expect when applying the algorithm on new data with a low prevalence of extended stay admissions.
 
-Another limitation of the SVC model is that it does not inherently perform feature selection, and therefore may result in limited prediction performance and overfitting on new datasets because of irrelevant features that were included in the model when training on the original data. As such, there can be limitations when applying this model on large datasets or high-dimensional feature spaces. Moreover, depending on what types of applications the SVC model is used for, there are also limitations to the model's interpretability.
+Another limitation of the ... model is that it does not inherently perform feature selection, and therefore may result in limited prediction performance and overfitting on new datasets because of irrelevant features that were included in the model when training on the original data. As such, there can be limitations when applying this model on large datasets or high-dimensional feature spaces. Moreover, depending on what types of applications the ... model is used for, there are also limitations to the model's interpretability.
 
